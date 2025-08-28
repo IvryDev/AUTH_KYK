@@ -1,116 +1,78 @@
-version: "3.9"
-
-networks:
-  edge:
-    driver: bridge
-
-volumes:
-  traefik_letsencrypt:
-  pg_data:
-
+version: '3.9'
 
 services:
-  traefik:
-    image: ${TRAEFIK_IMAGE}
-    command:
-      - "--api.dashboard=false"
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      - "--certificatesresolvers.le.acme.tlschallenge=true"
-      - "--certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL}"
-      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
-      - "--serversTransport.insecureSkipVerify=false"
-      - "--log.level=INFO"
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - traefik_letsencrypt:/letsencrypt
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks: [ edge ]
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test: [ "CMD", "wget", "-qO-", "http://localhost:80/ping" ]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-
   postgres:
-    image: ${POSTGRES_IMAGE}
+    image: postgres:16
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER_FILE: /run/secrets/db_user
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
-      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
     secrets:
       - db_user
       - db_password
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    networks: [ edge ]
-    restart: unless-stopped
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U $$(cat /run/secrets/db_user) -d keycloak -h 127.0.0.1" ]
+      test: [ "CMD-SHELL", "pg_isready -U $(cat /run/secrets/db_user)" ]
       interval: 10s
-      timeout: 5s
-      retries: 10
-    security_opt:
-      - no-new-privileges:true
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2g
+      retries: 5
+
+  traefik:
+    image: traefik:v3
+    command:
+      - "--providers.docker=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.le.acme.httpchallenge=true"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL}"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
 
   keycloak:
-    image: ${KEYCLOAK_IMAGE}
+    image: quay.io/keycloak/keycloak:26.0
     command:
-      - "start" # mode prod (Quarkus)
-      - "--optimized" # build au 1er boot -> plus rapide ensuite
-      - "--metrics-enabled=true"
-      - "--proxy=edge" # derrière un proxy TLS
-      - "--hostname-strict=true"
+      - start
+      - --hostname-strict=false
+      - --http-enabled=true
+      - --http-port=8080
+      - --proxy-headers=xforwarded
+      - --optimized
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
       KC_DB_USERNAME_FILE: /run/secrets/db_user
       KC_DB_PASSWORD_FILE: /run/secrets/db_password
       KC_HOSTNAME: ${KC_HOSTNAME}
-      # Cache local en mode single node; pour HA voir Option B (K8s)
-      KC_CACHE: local
-      # Admin (créé si non existant)
       KEYCLOAK_ADMIN_FILE: /run/secrets/keycloak_admin_user
       KEYCLOAK_ADMIN_PASSWORD_FILE: /run/secrets/keycloak_admin_password
     depends_on:
       postgres:
         condition: service_healthy
     labels:
-      # Exposition via Traefik
       traefik.enable: "true"
-      traefik.http.routers.kc.rule: "Host(`${KC_HOSTNAME}`)"
-      traefik.http.routers.kc.entrypoints: "websecure"
-      traefik.http.routers.kc.tls: "true"
-      traefik.http.routers.kc.tls.certresolver: "le"
-      traefik.http.services.kc.loadbalancer.server.port: "8080"
-
-      # Redirection HTTP -> HTTPS (routeur web)
-      traefik.http.routers.kc-web.rule: "Host(`${KC_HOSTNAME}`)"
-      traefik.http.routers.kc-web.entrypoints: "web"
-      traefik.http.routers.kc-web.middlewares: "https-redirect"
+      # Route HTTPS
+      traefik.http.routers.keycloak.rule: "Host(`${KC_HOSTNAME}`)"
+      traefik.http.routers.keycloak.entrypoints: "websecure"
+      traefik.http.routers.keycloak.tls.certresolver: "le"
+      traefik.http.services.keycloak.loadbalancer.server.port: "8080"
+      # HTTP -> HTTPS
+      traefik.http.routers.keycloak-web.rule: "Host(`${KC_HOSTNAME}`)"
+      traefik.http.routers.keycloak-web.entrypoints: "web"
+      traefik.http.routers.keycloak-web.middlewares: "https-redirect"
       traefik.http.middlewares.https-redirect.redirectscheme.scheme: "https"
-
-      # Sécurité headers (HSTS, XSS, referrer)
+      # Headers sécurité
       traefik.http.middlewares.kc-sec.headers.stsSeconds: "31536000"
       traefik.http.middlewares.kc-sec.headers.stsIncludeSubdomains: "true"
       traefik.http.middlewares.kc-sec.headers.stsPreload: "true"
       traefik.http.middlewares.kc-sec.headers.browserXssFilter: "true"
       traefik.http.middlewares.kc-sec.headers.contentTypeNosniff: "true"
-      traefik.http.routers.kc.middlewares: "kc-sec"
-
+      traefik.http.routers.keycloak.middlewares: "kc-sec"
     secrets:
       - db_user
       - db_password
@@ -119,27 +81,20 @@ services:
     networks: [ edge ]
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "curl", "-fsS", "http://127.0.0.1:8080/health/ready" ]
-      interval: 10s
-      timeout: 5s
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1" ]
+      interval: 15s
       retries: 10
-    security_opt:
-      - no-new-privileges:true
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2g
-        reservations:
-          cpus: "0.5"
-          memory: 1g
+
+volumes:
+  pg_data:
+
 
 secrets:
-  keycloak_admin_user:
-    file: ./secrets/keycloak_admin_user
-  keycloak_admin_password:
-    file: ./secrets/keycloak_admin_password
   db_user:
     file: ./secrets/db_user
   db_password:
     file: ./secrets/db_password
+  keycloak_admin_user:
+    file: ./secrets/keycloak_admin_user
+  keycloak_admin_password:
+    file: ./secrets/keycloak_admin_password
