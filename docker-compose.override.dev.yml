@@ -12,7 +12,7 @@ services:
     environment:
       # Pour le dev, on peut garder les fichiers de secrets
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
       KC_DB_USERNAME_FILE: /run/secrets/db_user
       KC_DB_PASSWORD_FILE: /run/secrets/db_password
       KEYCLOAK_ADMIN_FILE: /run/secrets/keycloak_admin_user
