@@ -1,81 +1,62 @@
-Option A — Docker Compose (Traefik + TLS auto + PostgreSQL)
-1) Arbo & fichiers
-infra/
-├─ docker-compose.yml
-├─ .env
-├─ secrets/
-│  ├─ keycloak_admin_user
-│  ├─ keycloak_admin_password
-│  ├─ db_user
-│  ├─ db_password
-└─ backup/
-   └─ pgbackrest.conf   (optionnel)
+# Keycloak + Traefik + Postgres (prod & dev)
 
-2) Créer les secrets (hors Git)
-```sh
-mkdir -p infra/secrets
-openssl rand -hex 8  > infra/secrets/keycloak_admin_user        # ex: admin-3f9a
-openssl rand -base64 32 > infra/secrets/keycloak_admin_password # fort
-echo "keycloak" > infra/secrets/db_user
-openssl rand -base64 32 > infra/secrets/db_password
-chmod 600 infra/secrets/*
+## Prérequis
+- Docker & Docker Compose v2
+- Nom de domaine pointant vers votre hôte (A/AAAA), ex: `auth.swilauto.com`
+- Ports 80/443 ouverts (firewall / cloud)
+
+## 1. Préparer l’arborescence
+```bash
+mkdir -p secrets letsencrypt traefik keycloak/realm-exports backup/db scripts
+cp .env.example .env
 ```
-1) .env (adapte le domaine / email)
-# Domaine public pour Keycloak
-```md
-KC_HOSTNAME=auth.mondomaine.com
 
-# Email pour Let's Encrypt
-LETSENCRYPT_EMAIL=ops@mondomaine.com
+## 2. Renseigner `.env`
+Éditez les valeurs (`KC_HOSTNAME`, `LETSENCRYPT_EMAIL`, versions d’images…).
 
-# Versions images (gèle les tags pour la reproductibilité)
-KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.0
-POSTGRES_IMAGE=postgres:16.4
-TRAEFIK_IMAGE=traefik:v3.1
+## 3. Créer les secrets
+```bash
+echo "keycloak" > secrets/db_user
+echo "un_motdepasse_TRES_robuste" > secrets/db_password
+echo "admin" > secrets/keycloak_admin_user
+echo "un_autre_motdepasse_TRES_robuste" > secrets/keycloak_admin_password
+chmod 600 secrets/*
 ```
-4) docker-compose.yml
-Pourquoi c’est “prod” ✅
 
-TLS auto & renouvellement via Traefik/Let’s Encrypt (HTTP→HTTPS forcé, HSTS).
+## 4. Initialiser Traefik ACME
+```bash
+touch letsencrypt/acme.json && chmod 600 letsencrypt/acme.json
+```
 
-Secrets Docker (pas d’identifiants en clair).
-
-Healthchecks PostgreSQL & Keycloak (readiness).
-
-Ressources limitées (évite l’OOM du JVM et protège la machine).
-
-Logs (stdout/stderr → branche dans ta stack ELK/Loki si besoin).
-
-Sécurité: no-new-privileges, proxy en frontal, pas d’exposition de port 8080 en public.
-
-5) Lancer
-cd infra
+## 5. Lancer en production (TLS automatique)
+```bash
 docker compose up -d
-# Attends ~1 min le premier build optimisé
-
-
-Va sur https://auth.mondomaine.com (utilise l’admin généré dans secrets/).
-
-6) Sauvegardes PostgreSQL (simple & efficace)
-
-Ajoute un job pg_dump quotidien (cron sur l’hôte ou conteneur dédié) :
-```sh
-
-docker run --rm --network infra_edge \
-  -v "$PWD/backups:/backups" \
-  -v "$PWD/secrets:/run/secrets:ro" \
-  ${POSTGRES_IMAGE} \
-  sh -c 'PGPASSWORD=$(cat /run/secrets/db_password) pg_dump -h postgres -U $(cat /run/secrets/db_user) keycloak \
-        | gzip > /backups/keycloak-$(date +%F-%H%M).sql.gz'
-
+```
+Attendez l’obtention des certificats (quelques dizaines de secondes). Visitez :
+```
+https://$KC_HOSTNAME
 ```
 
-Conserve au moins 7–14 jours de rétention + test de restauration.
+## 6. Lancer en développement local (sans Traefik)
+```bash
+docker compose -f docker-compose.yml -f docker-compose.override.dev.yml up -d
+open http://localhost:8080
+```
 
-7) Observabilité (Prometheus/Grafana)
+## 7. Export / Import de realm
+- Export : `make export-realm REALM=monrealm`
+- Import au démarrage : placez vos JSON dans `./keycloak/realm-exports/` et laissez `KC_IMPORT_REALM=true`
+- Import à chaud : `make import-realm REALM_FILE=keycloak/realm-exports/monrealm-realm.json`
 
-Keycloak expose /metrics (activé par --metrics-enabled=true).
+## 8. Sauvegardes PostgreSQL
+- Sauvegarde : `make backup-db`
+- Restauration : `make restore-db FILE=backup/db/keycloak_YYYY-MM-DD_HHMMSS.sql.gz`
 
-Scrape via Prometheus (job HTTP sur le service interne keycloak:8080).
+## 9. Mise à jour des images
+1. Modifiez les tags dans `.env` (KEYCLOAK_IMAGE, POSTGRES_IMAGE, TRAEFIK_IMAGE)
+2. `docker compose pull && docker compose up -d`
 
-Dashboard Grafana recommandé : Keycloak Metrics (plusieurs dispos sur la marketplace Grafana).
+## 10. Dépannage
+- **Boucle de redirection / 400** : vérifiez `--proxy=edge` et `KC_HOSTNAME`
+- **Certificats non émis** : testez l’accès HTTP (port 80) depuis l’extérieur, logs Traefik `docker compose logs traefik`
+- **DB connexion** : validez secrets et `KC_DB_URL`

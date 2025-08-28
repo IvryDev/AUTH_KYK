@@ -1,23 +1,25 @@
 version: '3.9'
 
 services:
-  postgres:
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: keycloak
+  traefik:
+    profiles: ["disabled"]
 
   keycloak:
     command:
       - start-dev
+      - --http-port=8080
+      - --hostname-strict=false
     environment:
+      # Pour le dev, on peut garder les fichiers de secrets
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: keycloak
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB_USERNAME_FILE: /run/secrets/db_user
+      KC_DB_PASSWORD_FILE: /run/secrets/db_password
+      KEYCLOAK_ADMIN_FILE: /run/secrets/keycloak_admin_user
+      KEYCLOAK_ADMIN_PASSWORD_FILE: /run/secrets/keycloak_admin_password
     ports:
       - "8080:8080"
+
+  postgres:
+    ports:
+      - "5432:5432"

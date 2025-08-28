@@ -2,7 +2,7 @@ version: '3.9'
 
 services:
   postgres:
-    image: postgres:16
+    image: ${POSTGRES_IMAGE}
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER_FILE: /run/secrets/db_user
@@ -13,42 +13,52 @@ services:
       - db_user
       - db_password
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U $(cat /run/secrets/db_user)" ]
+      test: ["CMD-SHELL", "pg_isready -U $(cat /run/secrets/db_user)"]
       interval: 10s
       retries: 5
+    restart: unless-stopped
+    networks: [ backend ]
 
   traefik:
-    image: traefik:v3
+    image: ${TRAEFIK_IMAGE}
     command:
       - "--providers.docker=true"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.le.acme.httpchallenge=true"
       - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
       - "--certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL}"
       - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--log.level=INFO"
+      - "--api.dashboard=false"  # laissez false en prod
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
+      - ./traefik:/etc/traefik/dynamic:ro
+    networks: [ edge ]
+    restart: unless-stopped
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.0
+    image: ${KEYCLOAK_IMAGE}
     command:
       - start
+      - --hostname=${KC_HOSTNAME}
       - --hostname-strict=false
       - --http-enabled=true
       - --http-port=8080
-      - --proxy-headers=xforwarded
+      - --proxy=edge
       - --optimized
+      - ${KC_IMPORT_REALM:+--import-realm}
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
       KC_DB_USERNAME_FILE: /run/secrets/db_user
       KC_DB_PASSWORD_FILE: /run/secrets/db_password
-      KC_HOSTNAME: ${KC_HOSTNAME}
       KEYCLOAK_ADMIN_FILE: /run/secrets/keycloak_admin_user
       KEYCLOAK_ADMIN_PASSWORD_FILE: /run/secrets/keycloak_admin_password
     depends_on:
@@ -56,38 +66,36 @@ services:
         condition: service_healthy
     labels:
       traefik.enable: "true"
+
       # Route HTTPS
       traefik.http.routers.keycloak.rule: "Host(`${KC_HOSTNAME}`)"
       traefik.http.routers.keycloak.entrypoints: "websecure"
       traefik.http.routers.keycloak.tls.certresolver: "le"
       traefik.http.services.keycloak.loadbalancer.server.port: "8080"
+
       # HTTP -> HTTPS
       traefik.http.routers.keycloak-web.rule: "Host(`${KC_HOSTNAME}`)"
       traefik.http.routers.keycloak-web.entrypoints: "web"
       traefik.http.routers.keycloak-web.middlewares: "https-redirect"
-      traefik.http.middlewares.https-redirect.redirectscheme.scheme: "https"
-      # Headers sécurité
-      traefik.http.middlewares.kc-sec.headers.stsSeconds: "31536000"
-      traefik.http.middlewares.kc-sec.headers.stsIncludeSubdomains: "true"
-      traefik.http.middlewares.kc-sec.headers.stsPreload: "true"
-      traefik.http.middlewares.kc-sec.headers.browserXssFilter: "true"
-      traefik.http.middlewares.kc-sec.headers.contentTypeNosniff: "true"
+
+      # Middlewares sécurité (cf. traefik/dynamic.yml)
       traefik.http.routers.keycloak.middlewares: "kc-sec"
     secrets:
       - db_user
       - db_password
       - keycloak_admin_user
       - keycloak_admin_password
-    networks: [ edge ]
+    volumes:
+      - ./keycloak/realm-exports:/opt/keycloak/data/import:ro
+    networks: [ backend, edge ]
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1" ]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready || exit 1"]
       interval: 15s
       retries: 10
 
 volumes:
   pg_data:
-
 
 secrets:
   db_user:
@@ -98,3 +106,9 @@ secrets:
     file: ./secrets/keycloak_admin_user
   keycloak_admin_password:
     file: ./secrets/keycloak_admin_password
+
+networks:
+  backend:
+    driver: bridge
+  edge:
+    driver: bridge
