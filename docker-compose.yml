@@ -71,7 +71,6 @@ services:
     command:
       - "start" # mode prod (Quarkus)
       - "--optimized" # build au 1er boot -> plus rapide ensuite
-      - "--health-enabled=true"
       - "--metrics-enabled=true"
       - "--proxy=edge" # derrière un proxy TLS
       - "--hostname-strict=true"
